@@ -20,7 +20,10 @@ class Installer
 		Dependencies::Readline_Dev
 	]
 	
+        attr_reader :options
+
 	def start(options = {})
+                @options = options
 		Dir.chdir(ROOT)
 		@version = File.read("version.txt")
 		@auto_install_prefix = options[:prefix]
@@ -194,7 +197,11 @@ private
 	
 	def compile_tcmalloc
 		Dir.chdir('source/distro/google-perftools-1.7') do
-			return sh("make libtcmalloc_minimal.la")
+                    if options[:tcmalloc_full]
+			return sh("make")
+                    else
+                        return sh("make libtcmalloc_minimal.la")
+                    end
 		end
 	end
 	
@@ -206,8 +213,13 @@ private
 			# overwrite the existing files in-place. Overwriting shared
 			# libraries in-place can cause existing processes that use
 			# those libraries to crash.
+                   if options[:tcmalloc_full]
+			sh("rm -rf '#{@destdir}#{@prefix}/lib'/libtcmalloc*.#{PlatformInfo::LIBEXT}*") &&
+			sh("cp -Rpf .libs/libtcmalloc*.#{PlatformInfo::LIBEXT}* '#{@destdir}#{@prefix}/lib/'")
+                   else
 			sh("rm -rf '#{@destdir}#{@prefix}/lib'/libtcmalloc_minimal*.#{PlatformInfo::LIBEXT}*") &&
 			sh("cp -Rpf .libs/libtcmalloc_minimal*.#{PlatformInfo::LIBEXT}* '#{@destdir}#{@prefix}/lib/'")
+                   end
 		end
 	end
 	
@@ -265,7 +277,11 @@ private
 			end
 			prelibs << " -L#{@destdir}#{@prefix}/lib"
 			if tcmalloc_supported?
+                            if options[:tcmalloc_full]
+				prelibs << " -ltcmalloc "
+                            else
 				prelibs << " -ltcmalloc_minimal "
+                            end
 			end
 			if platform_uses_two_level_namespace_for_dynamic_libraries?
 				prelibs << " -lsystem_allocator"
@@ -663,6 +679,9 @@ parser = OptionParser.new do |opts|
 	end
 	opts.on("--no-tcmalloc", "Do not install tcmalloc support.") do
 		options[:tcmalloc] = false
+	end
+	opts.on("--tcmalloc-full", "Install and link against full tcmalloc support, instead of only tcmalloc_minimal.") do
+		options[:tcmalloc_full] = true
 	end
 	opts.on("--no-dev-docs", "Do not install Ruby developer#{newline}documentation.") do
 		options[:install_dev_docs] = false
