@@ -21,6 +21,16 @@
 #include <ctype.h>
 #include "st.h"
 
+/* Default configuration */
+#ifndef SYCK_ASSERT_RAISE
+#define SYCK_ASSERT_RAISE 1
+#endif
+
+#ifndef SYCK_YYDEBUG
+#define SYCK_YYDEBUG 0
+#endif
+
+
 #if defined(__cplusplus)
 extern "C" {
 #endif
@@ -32,15 +42,23 @@ extern "C" {
 #include <alloca.h>
 #endif
 
+#if SYCK_ASSERT_RAISE
+#define DEBUG 1
+#endif
+
+#if SYCK_YYDEBUG
+#define YYDEBUG 1
+#endif
+
 #if DEBUG
-  void syck_assert( char *, unsigned );
+  void syck_assert( char *, unsigned, char * );
 # define ASSERT(f) \
     if ( f ) \
         {}   \
     else     \
-        syck_assert( __FILE__, __LINE__ )
+      syck_assert( __FILE__, __LINE__, #f )
 #else
-# define ASSERT(f)
+# define ASSERT(f) ((void) 0)
 #endif
 
 #ifndef NULL
