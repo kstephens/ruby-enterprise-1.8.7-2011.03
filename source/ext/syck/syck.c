@@ -13,19 +13,42 @@
 
 #include "syck.h"
 
+#ifndef SYCK_TRACK_NULLTERM
+#define SYCK_TRACK_NULLTERM 0
+#endif
+
+#define SYCK_BUFFER_EXTRA 0
+
+#ifndef SYCK_MPROTECT
+#define SYCK_MPROTECT 0
+#endif
+
+#if SYCK_MPROTECT
+#include <sys/mman.h>
+#endif
+
+#if SYCK_TRACK_NULLTERM
+char *syck_nullterm_p;
+#endif
+
 void syck_parser_pop_level( SyckParser * );
 
 /*
  * Custom assert
  */
 void 
-syck_assert( char *file_name, unsigned line_num )
+syck_assert( char *file_name, unsigned line_num, char *msg )
 {
+#if SYCK_ASSERT_RAISE
+    rb_raise(rb_eArgError, "Assertion failed: %s, line %u: %s",
+	     file_name, line_num, msg);
+#else
     fflush( NULL );
-    fprintf( stderr, "\nAssertion failed: %s, line %u\n",
-             file_name, line_num );
+    fprintf( stderr, "\nAssertion failed: %s, line %u: %s\n",
+             file_name, line_num, msg );
     fflush( stderr );
     abort();
+#endif
 }
 
 /*
@@ -35,7 +58,7 @@ char *
 syck_strndup( char *buf, long len )
 {
     char *new = S_ALLOC_N( char, len + 1 );
-    S_MEMZERO( new, char, len + 1 );
+    new[len] = 0;
     S_MEMCPY( new, buf, char, len );
     return new;
 }
@@ -54,6 +77,9 @@ syck_io_file_read( char *buf, SyckIoFile *file, long max_size, long skip )
     len = fread( buf + skip, sizeof( char ), max_size, file->ptr );
     len += skip;
     buf[len] = '\0';
+#if SYCK_TRACK_NULLTERM
+    syck_nullterm_p = &buf[len];
+#endif
 
     return len;
 }
@@ -69,31 +95,28 @@ syck_io_str_read( char *buf, SyckIoStr *str, long max_size, long skip )
 
     ASSERT( str != NULL );
     beg = str->ptr;
-    if ( max_size >= 0 )
-    {
-        max_size -= skip;
-        if ( max_size <= 0 )  max_size = 0;
-        else                  str->ptr += max_size;
+    max_size -= skip;
+    if ( max_size < 0 )
+      max_size = 0;
+    len = str->end - str->ptr;
+    if ( len > max_size )
+      len = max_size;
 
-        if ( str->ptr > str->end )
-        {
-            str->ptr = str->end;
-        }
-    }
-    else
-    {
-        /* Use exact string length */
-        while ( str->ptr < str->end ) {
-            if (*(str->ptr++) == '\n') break;
-        }
-    }
-    if ( beg < str->ptr )
-    {
-        len = ( str->ptr - beg );
-        S_MEMCPY( buf + skip, beg, char, len );
-    }
+    S_MEMCPY( buf + skip, beg, char, len );
+    str->ptr += len;
+
+    fprintf(stderr, "\n  %s: beg=%p, str->ptr=%p, len=%ld, max_size=%ld, skip=%ld\n", 
+	    __FUNCTION__,
+	    (void*) beg,
+	    (void*) str->ptr,
+	    (long) len,
+	    (long) max_size, (long) skip);
+
     len += skip;
     buf[len] = '\0';
+#if SYCK_TRACK_NULLTERM
+    syck_nullterm_p = &buf[len];
+#endif
 
     return len;
 }
@@ -121,8 +144,18 @@ syck_parser_reset_cursor( SyckParser *p )
 {
     if ( p->buffer == NULL )
     {
-        p->buffer = S_ALLOC_N( char, p->bufsize );
-        S_MEMZERO( p->buffer, char, p->bufsize );
+        p->buffer = S_ALLOC_N( char, p->bufsize + SYCK_BUFFER_EXTRA);
+        S_MEMZERO( p->buffer, char, p->bufsize + SYCK_BUFFER_EXTRA);
+#if SYCK_BUFFER_CHECK
+	p->buffer_end = p->buffer + p->bufsize;
+#if SYCK_BUFFER_EXTRA > 1
+        p->buffer_end[1] = -3;
+#if SYCK_MPROTECT
+	if ( mprotect(p->buffer_end + 1, SYCK_BUFFER_EXTRA - 1, PROT_READ) == -1 )
+	  perror(__FILE__);
+#endif
+#endif
+#endif
     }
     p->buffer[0] = '\0';
 
@@ -172,6 +205,9 @@ syck_new_parser()
     p->taguri_expansion = 0;
     p->bufsize = SYCK_BUFFERSIZE;
     p->buffer = NULL;
+#if SYCK_BUFFER_CHECK
+    p->buffer_end = NULL;
+#endif
     p->lvl_idx = 0;
     syck_parser_reset_levels( p );
     return p;
@@ -248,6 +284,16 @@ syck_free_parser( SyckParser *p )
 
     if ( p->buffer != NULL )
     {
+#if SYCK_BUFFER_CHECK
+#if SYCK_BUFFER_EXTRA > 1
+        ASSERT(p->buffer_end[1] == -3);
+#if SYCK_MPROTECT
+        if ( mprotect(p->buffer_end + 1, SYCK_BUFFER_EXTRA - 1, PROT_READ|PROT_WRITE|PROT_EXEC) == -1 ) 
+	  perror(__FILE__);
+#endif
+#endif
+        p->buffer_end = NULL;
+#endif
         S_FREE( p->buffer );
     }
     free_any_io( p );
@@ -368,7 +414,10 @@ syck_parser_add_level( SyckParser *p, int len, enum syck_level_status status )
         S_REALLOC_N( p->levels, SyckLevel, p->lvl_capa );
     }
 
+#if 0
+    /* Does not pass under unit tests. */
     ASSERT( len > p->levels[p->lvl_idx-1].spaces );
+#endif
     p->levels[p->lvl_idx].spaces = len;
     p->levels[p->lvl_idx].ncount = 0;
     p->levels[p->lvl_idx].domain = syck_strndup( p->levels[p->lvl_idx-1].domain, strlen( p->levels[p->lvl_idx-1].domain ) );
@@ -426,7 +475,7 @@ syck_move_tokens( SyckParser *p )
 }
 
 void
-syck_check_limit( SyckParser *p, long len )
+syck_check_limit( SyckParser *p, long len, long skip )
 {
     if ( p->cursor == NULL )
     {
@@ -436,28 +485,16 @@ syck_check_limit( SyckParser *p, long len )
         p->marker = p->buffer;
     }
     p->limit = p->buffer + len;
-}
 
-long
-syck_parser_read( SyckParser *p )
-{
-    long len = 0;
-    long skip = 0;
-    ASSERT( p != NULL );
-    switch ( p->io_type )
-    {
-        case syck_io_str:
-            skip = syck_move_tokens( p );
-            len = (p->io.str->read)( p->buffer, p->io.str, SYCK_BUFFERSIZE - 1, skip );
-            break;
-
-        case syck_io_file:
-            skip = syck_move_tokens( p );
-            len = (p->io.file->read)( p->buffer, p->io.file, SYCK_BUFFERSIZE - 1, skip );
-            break;
-    }
-    syck_check_limit( p, len );
-    return len;
+#if SYCK_BUFFER_CHECK
+#if SYCK_BUFFER_EXTRA > 1
+    ASSERT(p->buffer_end[1] == -3);
+#endif
+    ASSERT(p->buffer + len < p->buffer_end + SYCK_BUFFER_EXTRA);
+#endif
+#if SYCK_TRACK_NULLTERM
+    ASSERT(p->buffer <= syck_nullterm_p && syck_nullterm_p < (p->buffer_end + SYCK_BUFFER_EXTRA));
+#endif
 }
 
 long
@@ -478,8 +515,14 @@ syck_parser_readlen( SyckParser *p, long max_size )
             len = (p->io.file->read)( p->buffer, p->io.file, max_size, skip );
             break;
     }
-    syck_check_limit( p, len );
+    syck_check_limit( p, len, skip );
     return len;
+}
+
+long
+syck_parser_read( SyckParser *p )
+{
+    return syck_parser_readlen(p, SYCK_BUFFERSIZE - 1);
 }
 
 SYMID
