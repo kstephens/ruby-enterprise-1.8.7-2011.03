@@ -180,6 +180,7 @@ int rb_obj_respond_to _((VALUE, ID, int));
 int rb_respond_to _((VALUE, ID));
 void rb_interrupt _((void));
 VALUE rb_apply _((VALUE, ID, VALUE));
+void rb_backtrace_f _((FILE *));
 void rb_backtrace _((void));
 ID rb_frame_last_func _((void));
 ID rb_frame_this_func _((void));

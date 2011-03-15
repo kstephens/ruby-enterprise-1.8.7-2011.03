@@ -188,6 +188,14 @@ rb_warn_m(self, mesg)
     return Qnil;
 }
 
+static
+int rb_bug_signal = 0;
+
+void rb_bug_set_signal(int sig)
+{
+    rb_bug_signal = sig;
+}
+
 void
 #ifdef HAVE_STDARG_PROTOTYPES
 rb_bug(const char *fmt, ...)
@@ -210,6 +218,13 @@ rb_bug(fmt, va_alist)
 	va_end(args);
 	fprintf(out, "\n%s\n\n", ruby_description);
     }
+
+    if ( rb_bug_signal ) {
+        fprintf(out, " Signal: %d\n", (int) rb_bug_signal);
+    }
+    fprintf(out, " Backtrace:\n");
+    rb_backtrace_f(out);
+    
     abort();
 }
 

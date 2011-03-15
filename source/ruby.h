@@ -588,6 +588,7 @@ RUBY_EXTERN VALUE ruby_verbose, ruby_debug;
 
 NORETURN(void rb_raise __((VALUE, const char*, ...)));
 NORETURN(void rb_fatal __((const char*, ...)));
+void rb_bug_set_signal _((int));
 NORETURN(void rb_bug __((const char*, ...)));
 NORETURN(void rb_sys_fail _((const char*)));
 NORETURN(void rb_iter_break _((void)));

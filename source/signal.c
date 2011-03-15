@@ -575,6 +575,7 @@ sighandler(sig)
 #endif
 
     if (sig >= NSIG) {
+        rb_bug_set_signal(sig);
 	rb_bug("trap_handler: Bad signal %d", sig);
     }
 
@@ -722,6 +723,10 @@ sigbus(sig, ip, context)
   }
 #endif
 
+  /* Avoid invoking this signal handler again. */
+  signal(sig, SIG_DFL);
+
+  rb_bug_set_signal(sig);
   dump_machine_state(context);
   if (check_guard((caddr_t)ip->si_addr, rb_curr_thread)) {
     /* we hit the guard page, print out a warning to help app developers */
@@ -745,6 +750,10 @@ sigbus(sig)
     }
 #endif
 
+    /* Avoid invoking this signal handler again. */
+    signal(sig, SIG_DFL);
+
+    rb_bug_set_signal(sig);
     rb_bug("Bus Error");
 }
 #endif
@@ -767,6 +776,10 @@ sigsegv(sig, ip, context)
   }
 #endif
 
+  /* Avoid invoking this signal handler again. */
+  signal(sig, SIG_DFL);
+
+  rb_bug_set_signal(sig);
   dump_machine_state(context);
   if (check_guard((caddr_t)ip->si_addr, rb_curr_thread)) {
     /* we hit the guard page, print out a warning to help app developers */
@@ -790,7 +803,11 @@ sigsegv(sig)
     }
 #endif
 
+    /* Avoid invoking this signal handler again. */
+    signal(sig, SIG_DFL);
+
     rb_gc_unstress();
+    rb_bug_set_signal(sig);
     rb_bug("Segmentation fault");
 }
 #endif

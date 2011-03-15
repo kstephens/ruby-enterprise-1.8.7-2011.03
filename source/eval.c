@@ -6593,16 +6593,24 @@ rb_f_caller(argc, argv)
 }
 
 void
-rb_backtrace()
+rb_backtrace_f(fp)
+     FILE *fp;
 {
     long i;
     VALUE ary;
 
     ary = backtrace(-1);
     for (i=0; i<RARRAY(ary)->len; i++) {
-	printf("\tfrom %s\n", RSTRING(RARRAY(ary)->ptr[i])->ptr);
+        fprintf(fp, "\tfrom %s\n", RSTRING(RARRAY(ary)->ptr[i])->ptr);
     }
 }
+
+void
+rb_backtrace()
+{
+  rb_backtrace_f(stderr);
+}
+
 
 static VALUE
 make_backtrace()
