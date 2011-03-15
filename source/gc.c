@@ -18,6 +18,7 @@
 #include "node.h"
 #include "env.h"
 #include "re.h"
+#include "gc_api.h"
 #include <stdio.h>
 #include <setjmp.h>
 #include <math.h>
@@ -88,7 +89,19 @@ static size_t unstressed_malloc_limit = GC_MALLOC_LIMIT;
 
 static void run_final();
 static VALUE nomem_error;
+
+/*
+** Must invoke GC API callbacks when %SP is restored back to normal after
+** return from garbage_collect() because there is
+** not enough stack.  ruby_stack_check() will raise SystemStackError.
+** The MBARI version of forces %SP to a small reserved region.
+** This also means that callbacks inside garbage_collect() must not
+** cause the stack to overflow.
+*/
+static void garbage_collect_with_gc_api();
+static void garbage_collect_without_gc_api();
 static void garbage_collect();
+#define garbage_collect() garbage_collect_with_gc_api()
 
 
 /*
@@ -750,6 +763,9 @@ typedef struct RVALUE {
     char *file;
     int   line;
 #endif
+#ifdef GC_ALLOC_ID
+    size_t alloc_id;
+#endif
 } RVALUE;
 
 #if defined(_MSC_VER) || defined(__BORLANDC__) || defined(__CYGWIN__)
@@ -787,6 +803,12 @@ static RVALUE *himem, *lomem;
 #include "marktable.h"
 #include "marktable.c"
 #include "fastmarktable.c"
+
+/* for gc_api.h */
+int rb_gc_markedQ(VALUE object)
+{
+  return rb_mark_table_contains((RVALUE *) object);
+}
 
 static int gc_cycles = 0;
 
@@ -1001,6 +1023,16 @@ rb_during_gc()
     return during_gc;
 }
 
+#ifdef GC_ALLOC_ID
+static size_t alloc_id;
+static size_t stop_at_alloc_id = 0; /* 121539; */
+void rb_stop_at_alloc_id()
+{
+  fprintf(stderr, "rb_stop_at_alloc_id: %lu\n", (unsigned long) stop_at_alloc_id);
+  sleep(10);
+}
+#endif
+
 VALUE
 rb_newobj()
 {
@@ -1009,14 +1041,25 @@ rb_newobj()
     if (during_gc)
 	rb_bug("object allocation during garbage collection phase");
 
+#ifdef GC_USE_MALLOC_ONLY
+    obj = xmalloc(sizeof(RVALUE));
+#else
     if (!malloc_limit || !freelist) garbage_collect();
 
     obj = (VALUE)freelist;
     freelist = freelist->as.free.next;
+#endif
     MEMZERO((void*)obj, RVALUE, 1);
+
 #ifdef GC_DEBUG
     RANY(obj)->file = ruby_sourcefile;
     RANY(obj)->line = ruby_sourceline;
+#endif
+#ifdef GC_ALLOC_ID
+    RANY(obj)->alloc_id = ++ alloc_id;
+    if ( stop_at_alloc_id && alloc_id == stop_at_alloc_id ) {
+      rb_stop_at_alloc_id();
+    }
 #endif
     live_objects++;
     allocated_objects++;
@@ -1752,6 +1795,8 @@ gc_sweep()
     int live_counts[256];
     int do_gc_stats = gc_statistics & verbose_gc_stats;
 
+    rb_gc_invoke_callbacks(RB_GC_PHASE_SWEEP, RB_GC_PHASE_BEFORE); 
+ 
     live_objects = 0;
 
     for (i = 0; i < heaps_used; i++) {
@@ -1864,10 +1909,14 @@ gc_sweep()
     }
     malloc_increase = 0;
     if (freed < free_min) {
+ 	rb_gc_invoke_callbacks(RB_GC_PHASE_ALLOC, RB_GC_PHASE_BEFORE);
 	add_heap();
+ 	rb_gc_invoke_callbacks(RB_GC_PHASE_ALLOC, RB_GC_PHASE_AFTER);
     }
     during_gc = 0;
     
+    rb_gc_invoke_callbacks(RB_GC_PHASE_SWEEP, RB_GC_PHASE_AFTER); 
+
     if (do_gc_stats) {
 	fprintf(gc_data_file, "objects processed: %.7d\n", live_objects+freed);
 	fprintf(gc_data_file, "live objects	: %.7d\n", live_objects);
@@ -1893,7 +1942,9 @@ gc_sweep()
 	    rb_thread_pending = 1;
 	}
 	if (!freelist) {
+            rb_gc_invoke_callbacks(RB_GC_PHASE_ALLOC, RB_GC_PHASE_BEFORE);
 	    add_heap();
+            rb_gc_invoke_callbacks(RB_GC_PHASE_ALLOC, RB_GC_PHASE_AFTER);
 	}
 	return;
     }
@@ -1915,10 +1966,12 @@ make_deferred(p)
     p->as.basic.flags = (p->as.basic.flags & ~T_MASK) | T_DEFERRED;
 }
 
+VALUE rb_obj_free_last;
 static int
 obj_free(obj)
     VALUE obj;
 {
+    rb_obj_free_last = obj;
     switch (BUILTIN_TYPE(obj)) {
       case T_NIL:
       case T_FIXNUM:
@@ -2119,6 +2172,8 @@ garbage_collect_0(VALUE *top_frame)
 	}
     }
 
+    rb_gc_invoke_callbacks(RB_GC_PHASE_MARK, RB_GC_PHASE_BEFORE);
+
     gc_stack_limit = __stack_grow(STACK_END, GC_LEVEL_MAX);
     rb_mark_table_prepare();
     init_mark_stack();
@@ -2211,6 +2266,9 @@ garbage_collect_0(VALUE *top_frame)
 	}
 	rb_gc_abort_threads();
     } while (!MARK_STACK_EMPTY);
+
+    rb_gc_invoke_callbacks(RB_GC_PHASE_MARK, RB_GC_PHASE_AFTER);
+
     gc_sweep();
     rb_mark_table_finalize();
     gc_cycles++;
@@ -2228,11 +2286,35 @@ garbage_collect_0(VALUE *top_frame)
 }
 
 static void
+garbage_collect_with_gc_api()
+{
+  if ( ! (dont_gc || during_gc) ) {
+    rb_gc_invoke_callbacks(RB_GC_PHASE_START, RB_GC_PHASE_BEFORE);
+    rb_gc_invoke_callbacks(RB_GC_PHASE_START, RB_GC_PHASE_AFTER);
+  }
+
+  garbage_collect_without_gc_api();
+
+  if ( ! (dont_gc || during_gc) ) {
+    rb_gc_invoke_callbacks(RB_GC_PHASE_END, RB_GC_PHASE_BEFORE);
+    rb_gc_invoke_callbacks(RB_GC_PHASE_END, RB_GC_PHASE_AFTER);
+  }
+}
+
+static void
+#ifdef garbage_collect
+garbage_collect_without_gc_api()
+#else
 garbage_collect()
+#endif
 {
   jmp_buf save_regs_gc_mark;
   VALUE *top;
   FLUSH_REGISTER_WINDOWS;
+#ifdef GC_USE_MALLOC_ONLY
+  return;
+#endif
+
   /* This assumes that all registers are saved into the jmp_buf (and stack) */
   rb_setjmp(save_regs_gc_mark);
   top = __sp();
@@ -2737,10 +2819,15 @@ rb_gc_finalize_deferred()
     RVALUE *p = deferred_final_list;
 
     deferred_final_list = 0;
+
+    rb_gc_invoke_callbacks(RB_GC_PHASE_FINALIZE, RB_GC_PHASE_BEFORE);
+
     if (p) {
 	finalize_list(p);
 	free_unused_heaps();
     }
+
+    rb_gc_invoke_callbacks(RB_GC_PHASE_FINALIZE, RB_GC_PHASE_AFTER);
 }
 
 void
@@ -2749,6 +2836,10 @@ rb_gc_call_finalizer_at_exit()
     RVALUE *p, *pend;
     struct heaps_slot *heap;
     int i;
+
+    rb_gc_invoke_callbacks(RB_GC_PHASE_AT_EXIT, RB_GC_PHASE_BEFORE);
+
+    rb_gc_invoke_callbacks(RB_GC_PHASE_FINALIZE, RB_GC_PHASE_BEFORE); 
 
     /* run finalizers */
     if (need_call_final && finalizer_table) {
@@ -2795,6 +2886,10 @@ rb_gc_call_finalizer_at_exit()
 	    p++;
 	}
     }
+
+    rb_gc_invoke_callbacks(RB_GC_PHASE_FINALIZE, RB_GC_PHASE_AFTER);
+
+    rb_gc_invoke_callbacks(RB_GC_PHASE_AT_EXIT, RB_GC_PHASE_AFTER);
 }
 
 /*

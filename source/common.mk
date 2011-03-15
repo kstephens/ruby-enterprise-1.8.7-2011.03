@@ -33,6 +33,7 @@ OBJS	      = array.$(OBJEXT) \
 		eval.$(OBJEXT) \
 		file.$(OBJEXT) \
 		gc.$(OBJEXT) \
+		gc_api.$(OBJEXT) \
 		hash.$(OBJEXT) \
 		inits.$(OBJEXT) \
 		io.$(OBJEXT) \
@@ -395,7 +396,10 @@ file.$(OBJEXT): {$(VPATH)}file.c {$(VPATH)}ruby.h config.h \
   {$(VPATH)}defines.h {$(VPATH)}intern.h {$(VPATH)}missing.h \
   {$(VPATH)}rubyio.h {$(VPATH)}rubysig.h {$(VPATH)}util.h \
   {$(VPATH)}dln.h
-gc.$(OBJEXT): {$(VPATH)}gc.c {$(VPATH)}ruby.h config.h \
+gc_api.$(OBJEXT): {$(VPATH)}gc_api.c {$(VPATH)}gc_api.h \
+  {$(VPATH)}ruby.h config.h \
+  {$(VPATH)}defines.h {$(VPATH)}intern.h {$(VPATH)}missing.h
+gc.$(OBJEXT): {$(VPATH)}gc.c {$(VPATH)}gc_api.h {$(VPATH)}ruby.h config.h \
   {$(VPATH)}defines.h {$(VPATH)}intern.h {$(VPATH)}missing.h \
   {$(VPATH)}rubysig.h {$(VPATH)}st.h {$(VPATH)}node.h \
   {$(VPATH)}env.h {$(VPATH)}re.h {$(VPATH)}regex.h \
