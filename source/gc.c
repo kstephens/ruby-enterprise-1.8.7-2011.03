@@ -933,10 +933,10 @@ add_heap()
 #endif
 	RUBY_CRITICAL(membase = p = (RVALUE*)alloc_ruby_heap(alloc_size));
 	if (p == 0) {
-	    if (n_slots == heap_min_slots) {
+	    if (n_slots_requested == heap_min_slots) {
 		rb_memerror();
 	    }
-	    n_slots = heap_slots = heap_min_slots;
+	    n_slots_requested = heap_slots = heap_min_slots;
 	    continue;
 	}
 	n_slots = alloc_size / sizeof(RVALUE);
