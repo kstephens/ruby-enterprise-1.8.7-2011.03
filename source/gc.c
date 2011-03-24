@@ -896,7 +896,7 @@ add_heap()
 {
     RVALUE *p, *pend;
     void *membase;
-    int n_slots_requested = heap_slots; /* requested number of slots */
+    int n_slots_requested; /* requested number of slots */
     int n_slots; /* actual number of slots allocated. */
 
     if (heaps_used == heaps_length) {
@@ -919,18 +919,12 @@ add_heap()
 
     for (;;) {
         size_t alloc_size, align_offset;
-	if ( heap_max_slots && n_slots_requested > heap_max_slots )
-          n_slots_requested = heap_slots = heap_max_slots;
-	if ( heap_min_slots && n_slots_requested < heap_min_slots )
-          n_slots_requested = heap_slots = heap_min_slots;
+	n_slots_requested = heap_slots;
 	/* Requested slots allocation size. */
 	alloc_size = sizeof(RVALUE) * n_slots_requested; 
 	/* Align allocation size to page size. */
 	if ( (align_offset = alloc_size % heap_pagesize) )
 	    alloc_size += heap_pagesize - align_offset;
-#if 0
-	alloc_size -= 64; /* HACK padding for internal malloc() headers. */
-#endif
 	RUBY_CRITICAL(membase = p = (RVALUE*)alloc_ruby_heap(alloc_size));
 	if (p == 0) {
 	    if (n_slots_requested == heap_min_slots) {
@@ -967,11 +961,13 @@ add_heap()
     if (himem < pend) himem = pend;
     heaps_used++;
     heap_slots += heap_slots_increment;
+    heap_slots_increment *= heap_slots_growth_factor;
     if ( heap_min_slots && heap_slots < heap_min_slots )
         heap_slots = heap_min_slots;
-    if ( heap_max_slots && heap_slots > heap_max_slots ) 
+    if ( heap_max_slots && heap_slots > heap_max_slots ) {
         heap_slots = heap_max_slots;
-    heap_slots_increment *= heap_slots_growth_factor;
+	heap_slots_increment = 0;
+    }
 
     while (p < pend) {
 	p->as.free.flags = 0;
