@@ -210,6 +210,8 @@ rb_bug(fmt, va_alist)
     FILE *out = stderr;
     int len = err_position(buf, BUFSIZ);
 
+    rb_will_abort();
+
     if (fwrite(buf, 1, len, out) == len ||
 	fwrite(buf, 1, len, (out = stdout)) == len) {
 	fputs("[BUG] ", out);
@@ -219,6 +221,9 @@ rb_bug(fmt, va_alist)
 	fprintf(out, "\n%s\n\n", ruby_description);
     }
 
+    if ( rb_during_gc() ) {
+	fprintf(out, " During GC\n");
+    }
     if ( rb_bug_signal ) {
         fprintf(out, " Signal: %d\n", (int) rb_bug_signal);
     }

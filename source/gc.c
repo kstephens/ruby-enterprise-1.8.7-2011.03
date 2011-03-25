@@ -345,6 +345,12 @@ static int need_call_final = 0;
 static st_table *finalizer_table = 0;
 
 
+static int will_abort;
+void rb_will_abort()
+{
+  will_abort = 1;
+}
+
 /************************************************************
  * Heap and copy-on-write debugging support functions
  ************************************************************/
@@ -1005,6 +1011,10 @@ VALUE
 rb_newobj()
 {
     VALUE obj;
+
+    if ( will_abort ) {
+      return (VALUE)malloc(sizeof(RVALUE));
+    }
 
     if (during_gc)
 	rb_bug("object allocation during garbage collection phase");
@@ -2237,6 +2247,10 @@ garbage_collect()
   rb_setjmp(save_regs_gc_mark);
   top = __sp();
 
+  if ( will_abort ) {
+    return;
+  }
+
 #if STACK_WIPE_SITES & 0x400
 # ifdef nativeAllocA
   if ((!rb_main_thread || rb_curr_thread == rb_main_thread) && __stack_past (top, stack_limit)) {
@@ -2261,6 +2275,7 @@ garbage_collect()
 void
 rb_gc()
 {
+    if ( will_abort ) return;
     garbage_collect();
     rb_gc_finalize_deferred();
 }
