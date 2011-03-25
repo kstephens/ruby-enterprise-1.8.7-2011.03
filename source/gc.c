@@ -768,6 +768,8 @@ static int heap_free_min = 4096;
 static int heap_slots_increment = 10000;
 static double heap_slots_growth_factor = 1.8;
 
+static int rb_only_malloc = 0;
+
 static int verbose_gc_stats = Qfalse;
 
 static FILE* gc_data_file = NULL;
@@ -812,6 +814,9 @@ static void set_gc_parameters()
 
     if ( get_gc_parameter("RUBY_GC_STATS", &i) && i > 0 )
         verbose_gc_stats = Qtrue;
+
+    if ( get_gc_parameter("RUBY_HEAP_ONLY_MALLOC", &i) && i > 0 ) 
+        rb_only_malloc = i;
 
     if ( get_gc_parameter("RUBY_HEAP_INIT_SLOTS", &i) && i > 0 )
         heap_slots = i;
@@ -989,6 +994,10 @@ rb_newobj()
 {
     VALUE obj;
 
+    if ( rb_only_malloc ) {
+      obj = (VALUE) malloc(sizeof(RVALUE));
+    } else {
+
     if (during_gc)
 	rb_bug("object allocation during garbage collection phase");
 
@@ -996,6 +1005,7 @@ rb_newobj()
 
     obj = (VALUE)freelist;
     freelist = freelist->as.free.next;
+    }
     MEMZERO((void*)obj, RVALUE, 1);
 #ifdef GC_DEBUG
     RANY(obj)->file = ruby_sourcefile;
@@ -2220,6 +2230,10 @@ garbage_collect()
   rb_setjmp(save_regs_gc_mark);
   top = __sp();
 
+  if ( rb_only_malloc ) {
+    return;
+  }
+
 #if STACK_WIPE_SITES & 0x400
 # ifdef nativeAllocA
   if ((!rb_main_thread || rb_curr_thread == rb_main_thread) && __stack_past (top, stack_limit)) {
@@ -2444,6 +2458,7 @@ Init_heap()
 	Init_stack(0);
     }
     set_gc_parameters();
+    if ( ! rb_only_malloc )
     add_heap();
 }
 
