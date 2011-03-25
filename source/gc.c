@@ -942,11 +942,11 @@ add_heap()
         }
 	if ( verbose_gc_stats ) { 
 	  static size_t total_slots; 
-	  fprintf(gc_data_file, "add_heap(): pid=%d requested=%p[%d slots] actual=%p[%d slots], allocated=%p[%d bytes] total_slots_allocated=%lu\n", 
+	  fprintf(gc_data_file, "add_heap(): pid=%d requested=%p[%d slots] actual=%p[%d slots], allocated=%p[0x%lx bytes] total_slots_allocated=%lu\n", 
 		  (int) getpid(),
 		  p, n_slots_requested, 
 		  p, n_slots,
-		  membase, alloc_size, 
+		  membase, (unsigned long) alloc_size, 
 		  (unsigned long) (total_slots += n_slots));
 	}
         heaps[heaps_used].slot = p;
