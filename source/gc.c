@@ -1023,7 +1023,7 @@ rb_newobj()
 
     obj = (VALUE)freelist;
     freelist = freelist->as.free.next;
-    }
+    } /* will_abort */
     MEMZERO((void*)obj, RVALUE, 1);
 #ifdef GC_DEBUG
     RANY(obj)->file = ruby_sourcefile;
