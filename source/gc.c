@@ -344,11 +344,12 @@ static int during_gc;
 static int need_call_final = 0;
 static st_table *finalizer_table = 0;
 
+static int rb_only_malloc = 0;
 
 static int will_abort;
 void rb_will_abort()
 {
-  will_abort = 1;
+  rb_only_malloc = will_abort = 1;
 }
 
 /************************************************************
@@ -359,7 +360,7 @@ void rb_will_abort()
 static struct {
     FILE *terminal;
     
-    /* Whether to allocate Ruby heaps by mmapping a file. This makes it easier to see how many
+    /* Whether to allocate Ruby heaps by mmapping an anon file. This makes it easier to see how many
      * bytes in heaps have been made dirty, using memory analysis tools.
      */
     int alloc_heap_with_file;
@@ -381,6 +382,7 @@ static struct {
 } debug_options;
 
 #define OPTION_ENABLED(name) (getenv((name)) && *getenv((name)) && *getenv((name)) != '0')
+#define OPTION_ENABLED_WITH_DEFAULT(name, def) (getenv((name)) && *getenv((name)) ? *getenv((name)) != '0' : def)
 
 static VALUE
 rb_gc_init_debugging(VALUE self)
@@ -397,7 +399,7 @@ rb_gc_init_debugging(VALUE self)
 	    fflush(stderr);
 	}
     }
-    debug_options.alloc_heap_with_file  = OPTION_ENABLED("RD_ALLOC_HEAP_WITH_FILE");
+    debug_options.alloc_heap_with_file  = OPTION_ENABLED_WITH_DEFAULT("RD_ALLOC_HEAP_WITH_FILE", 1);
     debug_options.prompt_before_gc      = OPTION_ENABLED("RD_PROMPT_BEFORE_GC");
     debug_options.prompt_before_sweep   = OPTION_ENABLED("RD_PROMPT_BEFORE_SWEEP");
     debug_options.prompt_after_sweep    = OPTION_ENABLED("RD_PROMPT_AFTER_SWEEP");
@@ -439,29 +441,12 @@ debug_print(const char *message, ...)
  * Heap (de)allocation functions
  ************************************/
 
-typedef struct {
-    int fd;
-    size_t size;
-} FileHeapAllocatorMetaData;
-
 static void *
 alloc_ruby_heap_with_file(size_t size)
 {
-    FileHeapAllocatorMetaData meta;
-    meta.fd = open("/dev/zero", O_RDONLY);
-    meta.size = size;
-    if (meta.fd == -1) {
-	return NULL;
-    } else {
-	void *memory = mmap(NULL, size + sizeof(meta), PROT_READ | PROT_WRITE,
-	                    MAP_PRIVATE, meta.fd, 0);
-	if (memory == NULL) {
-	    return NULL;
-	} else {
-	    memcpy(memory, &meta, sizeof(meta));
-	    return memory + sizeof(meta);
-	}
-    }
+  void *memory = mmap(NULL, size, PROT_READ | PROT_WRITE,
+		      MAP_ANON | MAP_PRIVATE, -1, 0);
+  return memory;
 }
 
 static void *
@@ -475,19 +460,16 @@ alloc_ruby_heap(size_t size)
 }
 
 static void
-free_ruby_heap_with_file(void *heap)
+free_ruby_heap_with_file(void *heap, size_t heap_size)
 {
-    FileHeapAllocatorMetaData *meta = (FileHeapAllocatorMetaData *)
-        (heap - sizeof(FileHeapAllocatorMetaData));
-    close(meta->fd);
-    munmap(heap, meta->size + sizeof(FileHeapAllocatorMetaData));
+    munmap(heap, heap_size);
 }
 
 static void
-free_ruby_heap(void *heap)
+free_ruby_heap(void *heap, size_t heap_size)
 {
     if (debug_options.alloc_heap_with_file) {
-	free_ruby_heap_with_file(heap);
+        free_ruby_heap_with_file(heap, heap_size);
     } else {
 	free(heap);
     }
@@ -768,6 +750,7 @@ static RVALUE *deferred_final_list = 0;
 static int heaps_increment = 10;
 static struct heaps_slot {
     void *membase;
+    size_t membase_size;
     RVALUE *slot;
     int limit;
     RVALUE *slotlimit;
@@ -778,6 +761,14 @@ static int heaps_length = 0;
 static int heaps_used   = 0;
 
 static int heap_min_slots = 10000;
+static int heap_max_slots = 0;
+static size_t heap_pagesize = 
+#ifdef PAGESIZE
+  PAGESIZE
+#else
+  4 * 1024
+#endif
+  ;
 static int heap_slots = 10000;
 
 static int heap_free_min = 4096;
@@ -796,98 +787,68 @@ static RVALUE *himem, *lomem;
 
 static int gc_cycles = 0;
 
+static const char *get_gc_parameter(const char *var, int *ip)
+{
+    const char *s;
+    if ( (s = getenv(var)) ) {
+        if (verbose_gc_stats) {
+	    fprintf(gc_data_file, "%s=%s\n", var, s);
+        }
+	if ( ip ) 
+	    *ip = atoi(s);
+    }
+    return s;
+}
+
 static void set_gc_parameters()
 {
-    char *gc_stats_ptr, *min_slots_ptr, *free_min_ptr, *heap_slots_incr_ptr,
-      *heap_incr_ptr, *malloc_limit_ptr, *gc_heap_file_ptr, *heap_slots_growth_factor_ptr;
+    const char *s; int i; double d; long l;
 
     gc_data_file = stderr;
 
-    gc_stats_ptr = getenv("RUBY_GC_STATS");
-    if (gc_stats_ptr != NULL) {
-	int gc_stats_i = atoi(gc_stats_ptr);
-	if (gc_stats_i > 0) {
-	    verbose_gc_stats = Qtrue;
-	}
-    }
-
-    gc_heap_file_ptr = getenv("RUBY_GC_DATA_FILE");
-    if (gc_heap_file_ptr != NULL) {
-	FILE* data_file = fopen(gc_heap_file_ptr, "w");
+    if ( (s = get_gc_parameter("RUBY_GC_DATA_FILE", 0)) ) {
+	FILE* data_file = fopen(s, "w");
 	if (data_file != NULL) {
 	    gc_data_file = data_file;
 	}
 	else {
 	    fprintf(stderr,
-		    "can't open gc log file %s for writing, using default\n", gc_heap_file_ptr);
+		    "can't open gc log file %s for writing, using default\n", s);
 	}
     }
 
-    min_slots_ptr = getenv("RUBY_HEAP_MIN_SLOTS");
-    if (min_slots_ptr != NULL) {
-	int min_slots_i = atoi(min_slots_ptr);
-        if (verbose_gc_stats) {
-	    fprintf(gc_data_file, "RUBY_HEAP_MIN_SLOTS=%s\n", min_slots_ptr);
-        }
-	if (min_slots_i > 0) {
-	    heap_slots = min_slots_i;
-	    heap_min_slots = min_slots_i;
-	}
-    }
+    if ( get_gc_parameter("RUBY_GC_STATS", &i) && i > 0 )
+        verbose_gc_stats = Qtrue;
 
-    free_min_ptr = getenv("RUBY_HEAP_FREE_MIN");
-    if (free_min_ptr != NULL) {
-	int free_min_i = atoi(free_min_ptr);
-        if (verbose_gc_stats) {
-	    fprintf(gc_data_file, "RUBY_HEAP_FREE_MIN=%s\n", free_min_ptr);
-	}
-	if (free_min_i > 0) {
-	    heap_free_min = free_min_i;
-	}
-    }
+    if ( get_gc_parameter("RUBY_HEAP_ONLY_MALLOC", &i) && i > 0 ) 
+        rb_only_malloc = i;
 
-    heap_incr_ptr = getenv("RUBY_HEAP_INCREMENT");
-    if (heap_incr_ptr != NULL) {
-	int heap_incr_i = atoi(heap_incr_ptr);
-        if (verbose_gc_stats) {
-	    fprintf(gc_data_file, "RUBY_HEAP_INCREMENT=%s\n", heap_incr_ptr);
-	}
-	if (heap_incr_i > 0) {
-	    heaps_increment = heap_incr_i;
-	}
-    }
+    if ( get_gc_parameter("RUBY_HEAP_INIT_SLOTS", &i) && i > 0 )
+        heap_slots = i;
 
-    heap_slots_incr_ptr = getenv("RUBY_HEAP_SLOTS_INCREMENT");
-    if (heap_slots_incr_ptr != NULL) {
-	int heap_slots_incr_i = atoi(heap_slots_incr_ptr);
-        if (verbose_gc_stats) {
-	    fprintf(gc_data_file, "RUBY_HEAP_SLOTS_INCREMENT=%s\n", heap_slots_incr_ptr);
-	}
-	if (heap_slots_incr_i > 0) {
-	    heap_slots_increment = heap_slots_incr_i;
-	}
-    }
-    heap_slots_growth_factor_ptr = getenv("RUBY_HEAP_SLOTS_GROWTH_FACTOR");
-    if (heap_slots_growth_factor_ptr != NULL) {
-	double heap_slots_growth_factor_d = atof(heap_slots_growth_factor_ptr);
-        if (verbose_gc_stats) {
-	    fprintf(gc_data_file, "RUBY_HEAP_SLOTS_GROWTH_FACTOR=%s\n", heap_slots_growth_factor_ptr);
-	}
-	if (heap_slots_growth_factor_d > 0) {
-	    heap_slots_growth_factor = heap_slots_growth_factor_d;
-	}
-    }
+    if ( get_gc_parameter("RUBY_HEAP_MIN_SLOTS", &i) && i > 0 )
+        heap_min_slots = i;
 
-    malloc_limit_ptr = getenv("RUBY_GC_MALLOC_LIMIT");
-    if (malloc_limit_ptr != NULL) {
-	int malloc_limit_i = atol(malloc_limit_ptr);
-        if (verbose_gc_stats) {
-	    fprintf(gc_data_file, "RUBY_GC_MALLOC_LIMIT=%s\n", malloc_limit_ptr);
-	}
-	if (malloc_limit_i > 0) {
-	    malloc_limit = malloc_limit_i;
-	}
-    }
+    if ( get_gc_parameter("RUBY_HEAP_MAX_SLOTS", &i) && i > 0 )
+        heap_max_slots = i;
+
+    if ( get_gc_parameter("RUBY_HEAP_FREE_MIN", &i) && i > 0 )
+        heap_free_min = i;
+
+    if ( get_gc_parameter("RUBY_HEAP_INCREMENT", &i) && i > 0 )
+        heaps_increment = i;
+
+    if ( get_gc_parameter("RUBY_HEAP_SLOTS_INCREMENT", &i) && i >= 0 )
+        heap_slots_increment = i;
+    
+    if ( (s = get_gc_parameter("RUBY_HEAP_SLOTS_GROWTH_FACTOR", 0)) && (d = atof(s)) > 0 )
+        heap_slots_growth_factor = d;
+
+    if ( (s = get_gc_parameter("RUBY_HEAP_PAGESIZE", 0)) && (l = atol(s)) > 0 )
+        heap_pagesize = l;
+
+    if ( (s = get_gc_parameter("RUBY_GC_MALLOC_LIMIT", 0)) && (l = atol(s)) > 0 )
+        malloc_limit = l;
 }
 
 /*
@@ -944,6 +905,9 @@ static void
 add_heap()
 {
     RVALUE *p, *pend;
+    void *membase;
+    int n_slots_requested; /* requested number of slots */
+    int n_slots; /* actual number of slots allocated. */
 
     if (heaps_used == heaps_length) {
 	/* Realloc heaps */
@@ -964,33 +928,56 @@ add_heap()
     }
 
     for (;;) {
-	RUBY_CRITICAL(p = (RVALUE*)alloc_ruby_heap(sizeof(RVALUE)*(heap_slots+1)));
+        size_t alloc_size, align_offset;
+	n_slots_requested = heap_slots;
+	/* Requested slots allocation size. */
+	alloc_size = sizeof(RVALUE) * n_slots_requested; 
+	/* Align allocation size to page size. */
+	if ( (align_offset = alloc_size % heap_pagesize) )
+	    alloc_size += heap_pagesize - align_offset;
+	RUBY_CRITICAL(membase = p = (RVALUE*)alloc_ruby_heap(alloc_size));
 	if (p == 0) {
-	    if (heap_slots == heap_min_slots) {
+	    if (n_slots_requested == heap_min_slots) {
 		rb_memerror();
 	    }
-	    heap_slots = heap_min_slots;
+	    n_slots_requested = heap_slots = heap_min_slots;
 	    continue;
 	}
-        heaps[heaps_used].membase = p;
-        if ((VALUE)p % sizeof(RVALUE) == 0)
-            heap_slots += 1;
-        else
-            p = (RVALUE*)((VALUE)p + sizeof(RVALUE) - ((VALUE)p % sizeof(RVALUE)));
+	n_slots = alloc_size / sizeof(RVALUE);
+        heaps[heaps_used].membase = membase;
+	heaps[heaps_used].membase_size = alloc_size;
+	if ( (align_offset = ((size_t)p % sizeof(RVALUE))) ) { 
+	    p = (RVALUE*)((void*)p + (sizeof(RVALUE) - align_offset));
+	    n_slots --;
+        }
+	if ( verbose_gc_stats ) { 
+	  static size_t total_slots; 
+	  fprintf(gc_data_file, "add_heap(): pid=%d requested=%p[%d slots] actual=%p[%d slots], allocated=%p[%d bytes] total_slots_allocated=%lu\n", 
+		  (int) getpid(),
+		  p, n_slots_requested, 
+		  p, n_slots,
+		  membase, alloc_size, 
+		  (unsigned long) (total_slots += n_slots));
+	}
         heaps[heaps_used].slot = p;
-        heaps[heaps_used].limit = heap_slots;
-        heaps[heaps_used].slotlimit = p + heap_slots;
-        heaps[heaps_used].marks_size = (int) (ceil(heap_slots / (sizeof(int) * 8.0)));
+        heaps[heaps_used].limit = n_slots;
+        heaps[heaps_used].slotlimit = p + n_slots;
+        heaps[heaps_used].marks_size = (n_slots / (sizeof(int) * 8)) + 1;
         heaps[heaps_used].marks = (int *) calloc(heaps[heaps_used].marks_size, sizeof(int));
 	break;
     }
-    pend = p + heap_slots;
+    pend = p + n_slots;
     if (lomem == 0 || lomem > p) lomem = p;
     if (himem < pend) himem = pend;
     heaps_used++;
     heap_slots += heap_slots_increment;
     heap_slots_increment *= heap_slots_growth_factor;
-    if (heap_slots <= 0) heap_slots = heap_min_slots;
+    if ( heap_min_slots && heap_slots < heap_min_slots )
+        heap_slots = heap_min_slots;
+    if ( heap_max_slots && heap_slots > heap_max_slots ) {
+        heap_slots = heap_max_slots;
+	heap_slots_increment = 0;
+    }
 
     while (p < pend) {
 	p->as.free.flags = 0;
@@ -1012,8 +999,8 @@ rb_newobj()
 {
     VALUE obj;
 
-    if ( will_abort ) {
-      obj = (VALUE)malloc(sizeof(RVALUE));
+    if ( rb_only_malloc ) {
+      obj = (VALUE) malloc(sizeof(RVALUE));
     } else {
 
     if (during_gc)
@@ -1023,7 +1010,8 @@ rb_newobj()
 
     obj = (VALUE)freelist;
     freelist = freelist->as.free.next;
-    } /* will_abort */
+    }
+
     MEMZERO((void*)obj, RVALUE, 1);
 #ifdef GC_DEBUG
     RANY(obj)->file = ruby_sourcefile;
@@ -1734,7 +1722,7 @@ free_unused_heaps()
 
     for (i = j = 1; j < heaps_used; i++) {
 	if (heaps[i].limit == 0) {
-	    free_ruby_heap(heaps[i].membase);
+	    free_ruby_heap(heaps[i].membase, heaps[i].membase_size);
 	    free(heaps[i].marks);
 	    heaps_used--;
 	}
@@ -2248,9 +2236,7 @@ garbage_collect()
   rb_setjmp(save_regs_gc_mark);
   top = __sp();
 
-  if ( will_abort ) {
-    return;
-  }
+  if ( rb_only_malloc ) return;
 
 #if STACK_WIPE_SITES & 0x400
 # ifdef nativeAllocA
@@ -2276,7 +2262,7 @@ garbage_collect()
 void
 rb_gc()
 {
-    if ( will_abort ) return;
+    if ( rb_only_malloc ) return;
     garbage_collect();
     rb_gc_finalize_deferred();
 }
@@ -2477,6 +2463,7 @@ Init_heap()
 	Init_stack(0);
     }
     set_gc_parameters();
+    if ( ! rb_only_malloc )
     add_heap();
 }
 
