@@ -1013,8 +1013,8 @@ rb_newobj()
     VALUE obj;
 
     if ( will_abort ) {
-      return (VALUE)malloc(sizeof(RVALUE));
-    }
+      obj = (VALUE)malloc(sizeof(RVALUE));
+    } else {
 
     if (during_gc)
 	rb_bug("object allocation during garbage collection phase");
@@ -1023,6 +1023,7 @@ rb_newobj()
 
     obj = (VALUE)freelist;
     freelist = freelist->as.free.next;
+    }
     MEMZERO((void*)obj, RVALUE, 1);
 #ifdef GC_DEBUG
     RANY(obj)->file = ruby_sourcefile;
